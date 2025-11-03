@@ -1,0 +1,102 @@
+name: CI/CD Pipeline for Microservices
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-scan-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [server, gateway, fe, deploy, user]
+
+    steps:
+      # --- 1. 환경 설정 ---
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+          logout: false
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      # --- 2. Gradle 빌드 (서비스별) ---
+      - name: Build Gradle Project for ${{ matrix.service }}
+        run: ./gradlew :${{ matrix.service }}:build -x test
+
+      # --- 3. Docker 빌드, 스캔, 푸시 (서비스별) ---
+      - name: Build, Scan, and Push Docker Image for ${{ matrix.service }}
+        run: |
+          IMAGE_NAME="kwa06001/${{ matrix.service }}"
+          IMAGE_TAG="${{ github.sha }}"
+
+          docker build -t $IMAGE_NAME:$IMAGE_TAG -t $IMAGE_NAME:latest \
+            -f ./${{ matrix.service }}/Dockerfile \
+            ./${{ matrix.service }}
+          
+          echo "Image built: $IMAGE_NAME:$IMAGE_TAG"
+
+          mkdir -p ./trivy-reports
+
+          echo "::group::Running Trivy Scan for ${{ matrix.service }}"
+
+          # act에서도 작동: 현재 디렉토리를 볼륨 마운트
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd)/trivy-reports:/reports" \
+            aquasec/trivy:latest \
+            image --timeout 15m --severity HIGH,CRITICAL --exit-code 0 \
+              --format table \
+              --output /reports/trivy-report-${{ matrix.service }}.txt \
+              $IMAGE_NAME:$IMAGE_TAG
+
+          echo "::endgroup::"
+
+            docker push $IMAGE_NAME:$IMAGE_TAG
+            docker push $IMAGE_NAME:latest
+
+  # 2. EC2 배포 잡
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-scan-push
+
+    steps:
+      - name: Checkout repository (for docker-compose.yml)
+        uses: actions/checkout@v4
+
+      - name: SSH into EC2 and Deploy via Docker Compose
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          script: |
+            cd /home/ubuntu/SoftBankHackathon2025
+
+            git pull origin main
+            
+            docker compose pull
+            
+            docker compose up -d
+            
+            docker image prune -f
+            
+            echo "✅ Deployment completed successfully!"
+            docker compose ps

@@ -1,0 +1,40 @@
+name: Code Static Analysis (SAST)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # 수동 실행
+
+jobs:
+  semgrep_scan:
+    name: Run Semgrep SAST Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read       # 코드를 Checkout 하기 위함
+      security-events: write # GitHub Security 탭에 SARIF 결과를 업로드하기 위함
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep and generate SARIF
+        # Semgrep의 기본 Java 규칙 (p/default)을 사용하여 스캔
+        run: |
+          semgrep --config=p/default --sarif > semgrep-results.sarif
+        continue-on-error: true # 취약점을 찾아도 빌드를 중단하지 않음
+
+      - name: Upload SARIF to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-results.sarif
+          wait-for-processing: true
